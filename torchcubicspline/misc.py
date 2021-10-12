@@ -41,10 +41,9 @@ def tridiagonal_solve(b, A_upper, A_diagonal, A_lower):
     """
 
     # This implementation is very much written for clarity rather than speed.
-
-    A_upper, _ = torch.broadcast_tensors(A_upper, b[..., :-1])
-    A_lower, _ = torch.broadcast_tensors(A_lower, b[..., :-1])
-    A_diagonal, b = torch.broadcast_tensors(A_diagonal, b)
+    A_upper, _ = torch.broadcast_tensors(A_upper.unsqueeze(len(A_upper.shape)-1), b[..., :-1])
+    A_lower, _ = torch.broadcast_tensors(A_lower.unsqueeze(len(A_lower.shape)-1), b[..., :-1])
+    A_diagonal, b = torch.broadcast_tensors(A_diagonal.unsqueeze(len(A_diagonal.shape)-1), b)
 
     channels = b.size(-1)
 

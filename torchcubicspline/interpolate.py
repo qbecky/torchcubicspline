@@ -9,25 +9,25 @@ def _validate_input(t, X):
         raise ValueError("t must both be floating point.")
     if not X.is_floating_point():
         raise ValueError("X must both be floating point.")
-    if len(t.shape) != 1:
-        raise ValueError("t must be one dimensional. It instead has shape {}.".format(tuple(t.shape)))
+    # if len(t.shape) != 1:
+    #     raise ValueError("t must be one dimensional. It instead has shape {}.".format(tuple(t.shape)))
     prev_t_i = -math.inf
-    for t_i in t:
-        if t_i <= prev_t_i:
-            raise ValueError("t must be monotonically increasing.")
+    time_diffs = t[..., 1:] - t[..., :-1]
+    if torch.sum(time_diffs < 0) != 0:
+        raise ValueError("t must be monotonically increasing.")
 
     if X.ndimension() < 2:
         raise ValueError("X must have at least two dimensions, corresponding to time and channels. It instead has "
                          "shape {}.".format(tuple(X.shape)))
 
-    if X.size(-2) != t.size(0):
+    if X.size(-2) != t.size(-1):
         raise ValueError("The time dimension of X must equal the length of t. X has shape {} and t has shape {}, "
                          "corresponding to time dimensions of {} and {} respectively."
-                         .format(tuple(X.shape), tuple(t.shape), X.size(-2), t.size(0)))
+                         .format(tuple(X.shape), tuple(t.shape), X.size(-2), t.size(-1)))
 
-    if t.size(0) < 2:
+    if t.size(-1) < 2:
         raise ValueError("Must have a time dimension of size at least 2. It instead has shape {}, corresponding to a "
-                         "time dimension of size {}.".format(tuple(t.shape), t.size(0)))
+                         "time dimension of size {}.".format(tuple(t.shape), t.size(-1)))
 
 
 def _natural_cubic_spline_coeffs_without_missing_values(t, x):
@@ -46,22 +46,27 @@ def _natural_cubic_spline_coeffs_without_missing_values(t, x):
         three_d = torch.zeros(*x.shape[:-1], 1, dtype=x.dtype, device=x.device)
     else:
         # Set up some intermediate values
-        time_diffs = t[1:] - t[:-1]
+        time_diffs = t[..., 1:] - t[..., :-1]
         time_diffs_reciprocal = time_diffs.reciprocal()
         time_diffs_reciprocal_squared = time_diffs_reciprocal ** 2
         three_path_diffs = 3 * (x[..., 1:] - x[..., :-1])
         six_path_diffs = 2 * three_path_diffs
-        path_diffs_scaled = three_path_diffs * time_diffs_reciprocal_squared
+        path_diffs_scaled = three_path_diffs * time_diffs_reciprocal_squared.unsqueeze(len(t.shape)-1)
 
         # Solve a tridiagonal linear system to find the derivatives at the knots
-        system_diagonal = torch.empty(length, dtype=x.dtype, device=x.device)
-        system_diagonal[:-1] = time_diffs_reciprocal
-        system_diagonal[-1] = 0
-        system_diagonal[1:] += time_diffs_reciprocal
+        system_diagonal = torch.empty_like(t, device=x.device)
+        system_diagonal[..., :-1] = time_diffs_reciprocal
+        system_diagonal[..., -1] = 0
+        system_diagonal[..., 1:] += time_diffs_reciprocal
         system_diagonal *= 2
+        # system_diagonal = torch.empty(length, dtype=x.dtype, device=x.device)
+        # system_diagonal[:-1] = time_diffs_reciprocal
+        # system_diagonal[-1] = 0
+        # system_diagonal[1:] += time_diffs_reciprocal
+        # system_diagonal *= 2
         system_rhs = torch.empty_like(x)
         system_rhs[..., :-1] = path_diffs_scaled
-        system_rhs[..., -1] = 0
+        system_rhs[..., -1]  = 0
         system_rhs[..., 1:] += path_diffs_scaled
         knot_derivatives = misc.tridiagonal_solve(system_rhs, time_diffs_reciprocal, system_diagonal,
                                                   time_diffs_reciprocal)
@@ -69,12 +74,12 @@ def _natural_cubic_spline_coeffs_without_missing_values(t, x):
         # Do some algebra to find the coefficients of the spline
         a = x[..., :-1]
         b = knot_derivatives[..., :-1]
-        two_c = (six_path_diffs * time_diffs_reciprocal
+        two_c = (six_path_diffs * time_diffs_reciprocal.unsqueeze(len(t.shape)-1)
                  - 4 * knot_derivatives[..., :-1]
-                 - 2 * knot_derivatives[..., 1:]) * time_diffs_reciprocal
-        three_d = (-six_path_diffs * time_diffs_reciprocal
+                 - 2 * knot_derivatives[..., 1:]) * time_diffs_reciprocal.unsqueeze(len(t.shape)-1)
+        three_d = (-six_path_diffs * time_diffs_reciprocal.unsqueeze(len(t.shape)-1)
                    + 3 * (knot_derivatives[..., :-1]
-                          + knot_derivatives[..., 1:])) * time_diffs_reciprocal_squared
+                          + knot_derivatives[..., 1:])) * time_diffs_reciprocal_squared.unsqueeze(len(t.shape)-1)
 
     return a, b, two_c, three_d
 
