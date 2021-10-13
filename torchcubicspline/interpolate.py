@@ -266,6 +266,8 @@ class NaturalCubicSpline:
         """
         Arguments:
             coeffs: As returned by `torchcubicspline.natural_cubic_spline_coeffs`.
+
+        There should only be one batch dimension!!
         """
         super(NaturalCubicSpline, self).__init__(**kwargs)
 
@@ -279,27 +281,42 @@ class NaturalCubicSpline:
 
     def _interpret_t(self, t):
         maxlen = self._b.size(-2) - 1
-        index = torch.bucketize(t.detach(), self._t) - 1
+        # Get the cubic curve index for each t
+        index = torch.searchsorted(self._t, t.detach()) - 1
         index = index.clamp(0, maxlen)  # clamp because t may go outside of [t[0], t[-1]]; this is fine
         # will never access the last element of self._t; this is correct behaviour
-        fractional_part = t - self._t[index]
+
+        if len(self._t.shape) == 1:
+            fractional_part = t - self._t[index]
+        elif len(self._t.shape) == 2:
+            assert len(t.shape) == 2
+            # fancy indexing: get the column indices specified in `index` for each of `index` row
+            fractional_part = t - self._t[torch.arange(self._t.shape[0]).reshape(-1, 1), index]
+
         return fractional_part, index
 
     def evaluate(self, t):
+        '''
+        Input:
+        - t : a tensor having the same order as self._t
+        '''
         fractional_part, index = self._interpret_t(t)
-        fractional_part = fractional_part.unsqueeze(-1)
-        inner = self._c[..., index, :] + self._d[..., index, :] * fractional_part
-        inner = self._b[..., index, :] + inner * fractional_part
-        return self._a[..., index, :] + inner * fractional_part
+        fractional_part = fractional_part.unsqueeze(-1)        
+        idx_broadcast = torch.arange(self._t.shape[0]).reshape(-1, 1)
+        inner = self._c[idx_broadcast, index, :] + self._d[idx_broadcast, index, :] * fractional_part
+        inner = self._b[idx_broadcast, index, :] + inner * fractional_part
+        return self._a[idx_broadcast, index, :] + inner * fractional_part
 
     def derivative(self, t, order=1):
         fractional_part, index = self._interpret_t(t)
         fractional_part = fractional_part.unsqueeze(-1)
+        idx_broadcast = torch.arange(self._t.shape[0]).reshape(-1, 1)
+
         if order == 1:
-            inner = 2 * self._c[..., index, :] + 3 * self._d[..., index, :] * fractional_part
-            deriv = self._b[..., index, :] + inner * fractional_part
+            inner = 2 * self._c[idx_broadcast, index, :] + 3 * self._d[idx_broadcast, index, :] * fractional_part
+            deriv = self._b[idx_broadcast, index, :] + inner * fractional_part
         elif order == 2:
-            deriv = 2 * self._c[..., index, :] + 6 * self._d[..., index, :] * fractional_part
+            deriv = 2 * self._c[idx_broadcast, index, :] + 6 * self._d[idx_broadcast, index, :] * fractional_part
         else:
             raise ValueError('Derivative is not implemented for orders greater than 2.')
         return deriv

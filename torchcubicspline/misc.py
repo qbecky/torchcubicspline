@@ -8,6 +8,43 @@ def cheap_stack(tensors, dim):
     else:
         return torch.stack(tensors, dim=dim)
 
+def expand_to_target_size(tensor, target_size):
+    '''
+    Input:
+    - tensor      : a tensor of shape (?,) to expand
+    - target_size : a tensor size
+
+    Ouptut:
+    - exp_tensor : a tensor of shape (?, *target_size)
+    '''
+    # new_shape gives the number of new dimensions to add to a column vector of 'tensor' to match targeted order
+    new_shape   = [tensor.shape[0]] + [1 for i in range(len(target_size)-1)]
+    # repeat_list gives how many times each dimension should be repeated so that 'tensor' has the correct shape
+    repeat_list = [1] + list(target_size)
+    exp_tensor = tensor.reshape(*new_shape).repeat(*repeat_list)
+    return exp_tensor
+
+def bucketize_different_boundaries(tensor, boundaries): 
+    '''
+    This function extends torch.bucketize in the case of boundaries with 
+
+    Input:
+    - tensor : a tensor of shape (?, d1, ..., dn) to be bucketized, the first dimension is the batch dimension
+    - boundaries : a tensor of shape (?, n_bdry) containing 
+    
+    Output:
+    - result : a tensor of shape (?, d1, ..., dn) containing the bucket ids
+    ''' 
+
+    results = torch.zeros_like(tensor, dtype=torch.int64)
+    # essentially the same thing as expand_to_target_size, enables reusing new_shape and repeat_list
+    new_shape   = [boundaries.shape[0]] + [1 for i in range(len(tensor.shape)-1)]
+    repeat_list = [1] + list(tensor.shape[1:])
+    for j in range(boundaries.shape[1]):
+        reshaped_boundary = boundaries[:, j].reshape(*new_shape).repeat(*repeat_list)
+        results += (tensor > reshaped_boundary).int()
+    return results
+
 
 def tridiagonal_solve(b, A_upper, A_diagonal, A_lower):
     """Solves a tridiagonal system Ax = b.
