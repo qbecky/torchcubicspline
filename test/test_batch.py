@@ -3,7 +3,7 @@ _sys.path.append("../torchcubicspline/")
 
 import torch
 from torchcubicspline import (natural_cubic_spline_coeffs, 
-                              NaturalCubicSpline)
+                              NaturalCubicSpline, NaturalCubicSplineWithVaryingTs)
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
 
@@ -22,7 +22,7 @@ if __name__=="__main__":
     torch.manual_seed(2)
     xs = torch.rand(batch_size, length, channels)
     coeffs = natural_cubic_spline_coeffs(t, xs)
-    old_spline = NaturalCubicSpline(coeffs)
+    old_spline = NaturalCubicSplineWithVaryingTs(coeffs)
 
     refined_t = torch.linspace(0, 1, 1000).unsqueeze(0).repeat(batch_size, 1)
     old_x_spline = old_spline.evaluate(refined_t)

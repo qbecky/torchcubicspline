@@ -272,7 +272,7 @@ class NaturalCubicSpline:
         super(NaturalCubicSpline, self).__init__(**kwargs)
 
         t, a, b, c, d = coeffs
-
+        assert len(t.shape) == 1
         self._t = t
         self._a = a
         self._b = b
@@ -285,13 +285,82 @@ class NaturalCubicSpline:
         index = torch.searchsorted(self._t, t.detach()) - 1
         index = index.clamp(0, maxlen)  # clamp because t may go outside of [t[0], t[-1]]; this is fine
         # will never access the last element of self._t; this is correct behaviour
+        fractional_part = t - self._t[index]
+        return fractional_part, index
 
-        if len(self._t.shape) == 1:
-            fractional_part = t - self._t[index]
-        elif len(self._t.shape) == 2:
-            assert len(t.shape) == 2
-            # fancy indexing: get the column indices specified in `index` for each of `index` row
-            fractional_part = t - self._t[torch.arange(self._t.shape[0]).reshape(-1, 1), index]
+    def evaluate(self, t):
+        '''
+        Input:
+        - t : a tensor having the same order as self._t
+        '''
+        fractional_part, index = self._interpret_t(t)
+        fractional_part = fractional_part.unsqueeze(-1)
+        inner = self._c[..., index, :] + self._d[..., index, :] * fractional_part
+        inner = self._b[..., index, :] + inner * fractional_part
+        return self._a[..., index, :] + inner * fractional_part
+
+    def derivative(self, t, order=1):
+        fractional_part, index = self._interpret_t(t)
+        fractional_part = fractional_part.unsqueeze(-1)
+
+        if order == 1:
+            inner = 2 * self._c[..., index, :] + 3 * self._d[..., index, :] * fractional_part
+            deriv = self._b[..., index, :] + inner * fractional_part
+        elif order == 2:
+            deriv = 2 * self._c[..., index, :] + 6 * self._d[..., index, :] * fractional_part
+        else:
+            raise ValueError('Derivative is not implemented for orders greater than 2.')
+        return deriv
+
+
+
+class NaturalCubicSplineWithVaryingTs:
+    """Calculates the natural cubic spline approximation to the batch of controls given. Also calculates its derivative.
+
+    Example:
+        t = torch.linspace(0, 1, 7)
+        # (2, 1) are batch dimensions. 7 is the time dimension (of the same length as t). 3 is the channel dimension.
+        x = torch.rand(2, 1, 7, 3)
+        coeffs = natural_cubic_spline_coeffs(t, x)
+
+        # ...at this point you can save the coeffs, put them through PyTorch's Datasets and DataLoaders, etc...
+
+        spline = NaturalCubicSplineWithVaryingTs(coeffs)
+
+        point = torch.tensor(0.4)
+        # will be a tensor of shape (2, 1, 3), corresponding to batch and channel dimensions
+        out = spline.derivative(point)
+
+        point = torch.tensor([0.4, 0.5])
+        # will be a tensor of shape (2, 1, 2, 3), corresponding to batch, time and channel dimensions
+        out = spline.derivative(point)
+    """
+
+    def __init__(self, coeffs, **kwargs):
+        """
+        Arguments:
+            coeffs: As returned by `torchcubicspline.natural_cubic_spline_coeffs`.
+
+        There should only be one batch dimension!!
+        """
+        super(NaturalCubicSplineWithVaryingTs, self).__init__(**kwargs)
+
+        t, a, b, c, d = coeffs
+        assert len(t.shape) == 2
+        self._t = t
+        self._a = a
+        self._b = b
+        self._c = c
+        self._d = d
+
+    def _interpret_t(self, t):
+        maxlen = self._b.size(-2) - 1
+        # Get the cubic curve index for each t
+        index = torch.searchsorted(self._t, t.detach()) - 1
+        index = index.clamp(0, maxlen)  # clamp because t may go outside of [t[0], t[-1]]; this is fine
+        # will never access the last element of self._t; this is correct behaviour
+        # fancy indexing: get the column indices specified in `index` for each of `index` row
+        fractional_part = t - self._t[torch.arange(self._t.shape[0]).reshape(-1, 1), index]
 
         return fractional_part, index
 
@@ -320,3 +389,4 @@ class NaturalCubicSpline:
         else:
             raise ValueError('Derivative is not implemented for orders greater than 2.')
         return deriv
+
