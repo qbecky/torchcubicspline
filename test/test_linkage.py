@@ -4,6 +4,7 @@ _sys.path.append("../torchcubicspline/")
 
 import numpy as np
 import torch
+import torch.optim as optim
 from torchcubicspline import (natural_cubic_spline_coeffs, 
                               NaturalCubicSpline, NaturalCubicSplineWithVaryingTs)
 import matplotlib.pyplot as plt
@@ -97,6 +98,83 @@ def ComputeElasticRodsDiscretization(controlPoints, nJoints, subdivision, mult=1
 
     return newSplines, discSPoints
 
+def ComputeStraightness(discPoints):
+    '''
+    Input:
+    - discPoints : torch tensor of shape (nRods, nDisc, 3) containing the discretized point along the rod
+
+    Output:
+    - cosEdges : tensor of shape (nRods, nDisc-2) containing the cosine similarity between neighboring edges
+    '''
+
+    edges    = discPoints[:, 1:, :] - discPoints[:, :-1, :]                         # (nRods, nDisc-1, 3)
+    dotEdges = torch.einsum('ijk, ijk -> ij', edges[:, 1:, :], edges[:, :-1, :])    # (nRods, nDisc-2)
+    lenEdges = torch.linalg.norm(edges, dim=2)                                      # (nRods, nDisc-1)
+    cosEdges = dotEdges / (lenEdges[:, 1:] * lenEdges[:, :-1])                      # (nRods, nDisc-2)
+    return cosEdges
+
+def ComputeShapePreservation(tensor1, tensor2):
+    ''' 
+    Input:
+    - tensor1 : tensor to compare with tensor2
+    - tensor2 : same size as tensor1
+
+    Output:
+    - similarity : similarity between current and target
+    '''
+
+    return 0.5 * torch.sum((tensor1 - tensor2) ** 2)
+
+def Criteria(jointsTorch, yHorMidControl, xVertMidControl, returnSplines):
+    '''
+    Input:
+    - jointsTorch     : tensor of shape (nJx, nJy, 3) containing the joints position
+    - yHorMidControl  : tensor of shape (nJx-1, nJy) containing the control point y coordinate for horizontal edges
+    - xVertMidControl : tensor of shape (nJx, nJy-1) containing the control point x coordinate for vertical edges
+    - returnSplines   : whether we return splines as well or not
+
+    Output:
+    - straightHor   : measure of straightness of horizontal beams
+    - straightVer   : measure of straightness of vertical beams
+    - presJoints    : preservation energy at the joints
+    - newSplinesHor : horizontal splines (arc-length parameterized)
+    - newSplinesVer : vertical splines (arc-length parameterized)
+    '''
+
+    horMidControl = torch.zeros(size=(nJx-1, nJy, 3))
+    horMidControl[:, :, 0] = (jointsTorch[1:, :, 0] + jointsTorch[:-1, :, 0]) / 2
+    horMidControl[:, :, 1] = yHorMidControl
+
+    vertMidControl = torch.zeros(size=(nJx, nJy-1, 3))
+    vertMidControl[:, :, 0] = xVertMidControl
+    vertMidControl[:, :, 1] = (jointsTorch[:, 1:, 1] + jointsTorch[:, :-1, 1]) / 2
+
+    # Horizontal edges
+    x             = torch.zeros(size=(2*nJx-1, nJy, 3))
+    x[0::2, :, :] = jointsTorch
+    x[1::2, :, :] = horMidControl
+
+    ## Get the positions
+    newSplinesHor, discSHor = ComputeElasticRodsDiscretization(torch.swapaxes(x, 0, 1), nJx, subdivision, mult=mult)
+    discHor = newSplinesHor.evaluate(discSHor)
+
+    # Vertical edges
+    x             = torch.zeros(size=(nJx, 2*nJy-1, 3))
+    x[:, 0::2, :] = jointsTorch
+    x[:, 1::2, :] = vertMidControl
+
+    ## Get the positions
+    newSplinesVert, discSVert = ComputeElasticRodsDiscretization(x, nJy, subdivision, mult=mult)
+    discVert = newSplinesVert.evaluate(discSVert)
+
+    straightHor = 1. - torch.mean(ComputeStraightness(discHor))
+    straightVer = 1. - torch.mean(ComputeStraightness(discVert))
+    presJoints  = ComputeShapePreservation(jointsTorch, jointsTorchInit)
+
+    listOut = [straightHor, straightVer, presJoints]
+    if returnSplines:
+        listOut += [newSplinesHor, newSplinesVert]
+    return listOut
 
 
 def PrintSpeeds(splines, nSplines):
@@ -149,14 +227,18 @@ if __name__=="__main__":
     vertMidControl[:, :, 0] = xVertMidControl
     vertMidControl[:, :, 1] = (jointsTorch[:, 1:, 1] + jointsTorch[:, :-1, 1]) / 2
 
+    jointsTorchInit     = jointsTorch.detach().clone()
+    yHorMidControlInit  = yHorMidControl.detach().clone()
+    xVertMidControlInit = xVertMidControl.detach().clone()
+
     # Horizontal edges
     x             = torch.zeros(size=(2*nJx-1, nJy, 3))
     x[0::2, :, :] = jointsTorch
     x[1::2, :, :] = horMidControl
 
     ## Get the positions
-    newSplinesHor, discSHor = ComputeElasticRodsDiscretization(torch.swapaxes(x, 0, 1), nJx, subdivision, mult=mult)
-    discHor = newSplinesHor.evaluate(discSHor)
+    initSplinesHor, discSHor = ComputeElasticRodsDiscretization(torch.swapaxes(x, 0, 1), nJx, subdivision, mult=mult)
+    discHor = initSplinesHor.evaluate(discSHor)
 
     # Vertical edges
     x             = torch.zeros(size=(nJx, 2*nJy-1, 3))
@@ -164,30 +246,108 @@ if __name__=="__main__":
     x[:, 1::2, :] = vertMidControl
 
     ## Get the positions
-    newSplinesVert, discSVert = ComputeElasticRodsDiscretization(x, nJy, subdivision, mult=mult)
-    discVert = newSplinesVert.evaluate(discSVert)
+    initSplinesVert, discSVert = ComputeElasticRodsDiscretization(x, nJy, subdivision, mult=mult)
+    discVert = initSplinesVert.evaluate(discSVert)
 
-    gs = gridspec.GridSpec(nrows=1, ncols=1, width_ratios=[1], height_ratios=[1])
-    fig = plt.figure(figsize=(8, 8))
+    # gs = gridspec.GridSpec(nrows=1, ncols=1, width_ratios=[1], height_ratios=[1])
+    # fig = plt.figure(figsize=(8, 8))
 
-    axTmp = plt.subplot(gs[0, 0])
+    # axTmp = plt.subplot(gs[0, 0])
     # newJointsHor  = new_spline_hor.evaluate(new_s_knots_hor[:,::2]).reshape(-1, 3)
     # newJointsVert = new_spline_vert.evaluate(new_s_knots_vert[:,::2]).reshape(-1, 3)
     # axTmp.scatter(ToNumpy(newJointsHor[:, 0]), ToNumpy(newJointsHor[:, 1]), c='b', s=10)
     # axTmp.scatter(ToNumpy(newJointsVert[:, 0]), ToNumpy(newJointsVert[:, 1]), c='b', s=10)
-    for xSpline in discHor:
-        axTmp.plot(ToNumpy(xSpline[:, 0]), ToNumpy(xSpline[:, 1]), c='b')
-        axTmp.scatter(ToNumpy(xSpline[:, 0]), ToNumpy(xSpline[:, 1]), c='b', s=10)
-    for xSpline in discVert:
-        axTmp.plot(ToNumpy(xSpline[:, 0]), ToNumpy(xSpline[:, 1]), c='k')
-        axTmp.scatter(ToNumpy(xSpline[:, 0]), ToNumpy(xSpline[:, 1]), c='k', s=10)
+    # for xSpline in discHor:
+    #     axTmp.plot(ToNumpy(xSpline[:, 0]), ToNumpy(xSpline[:, 1]), c='b')
+    #     axTmp.scatter(ToNumpy(xSpline[:, 0]), ToNumpy(xSpline[:, 1]), c='b', s=10)
+    # for xSpline in discVert:
+    #     axTmp.plot(ToNumpy(xSpline[:, 0]), ToNumpy(xSpline[:, 1]), c='k')
+    #     axTmp.scatter(ToNumpy(xSpline[:, 0]), ToNumpy(xSpline[:, 1]), c='k', s=10)
+    # axTmp.set_title("Splines network", fontsize=14)
+    # axTmp.grid()
+
+    # PrintSpeeds(newSplinesHor, nJy)
+    # PrintSpeeds(newSplinesVert, nJx)
+
+    # plt.show()
+
+    straightVer = 1. - torch.mean(ComputeStraightness(discVert))
+    straightHor = 1. - torch.mean(ComputeStraightness(discHor))
+    presJoints  = ComputeShapePreservation(jointsTorch, jointsTorchInit)
+
+    loss = straightVer + straightHor + presJoints
+    loss.backward()
+
+    # Start the optimization
+
+    jointsTorchOptim     = jointsTorch.detach().clone()
+    yHorMidControlOptim  = yHorMidControl.detach().clone()
+    xVertMidControlOptim = xVertMidControl.detach().clone()
+
+    jointsTorchOptim.requires_grad = True
+    yHorMidControlOptim.requires_grad = True
+    xVertMidControlOptim.requires_grad = True
+
+    descender = optim.Adam([jointsTorchOptim, yHorMidControlOptim, xVertMidControlOptim], lr=0.1*scale_linkage)
+    optim_steps = 200
+    weights     = [1., 1., 1e-3/(scale_linkage ** 2)]
+
+    straightVerOptim = torch.zeros(size=(optim_steps+1,))
+    straightHorOptim = torch.zeros(size=(optim_steps+1,))
+    presJointsOptim  = torch.zeros(size=(optim_steps+1,))
+
+    straightVerOptim[0] = straightVer.detach()
+    straightHorOptim[0] = straightHor.detach()
+    presJointsOptim[0]  = presJoints .detach()
+
+    for i in range(optim_steps):
+        
+        descender.zero_grad()
+        listOut = Criteria(jointsTorchOptim, yHorMidControlOptim, xVertMidControlOptim, returnSplines=True)
+        loss = weights[0] * listOut[0] + weights[1] * listOut[1] + weights[2] * listOut[2]
+        straightHorOptim[i+1] = weights[0] * listOut[0].detach()
+        straightVerOptim[i+1] = weights[1] * listOut[1].detach()
+        presJointsOptim[i+1]  = weights[2] * listOut[2] .detach()
+        loss.backward()
+        descender.step()
+
+    initJointsNP = ToNumpy(jointsTorchInit).reshape(-1, 3)
+    optJoints    = ToNumpy(jointsTorchOptim).reshape(-1, 3)
+
+    # Final positions
+    nDisc = 100
+    tHor = torch.linspace(0., 1., nDisc).reshape(1, -1).repeat(nJy, 1)
+    tVer = torch.linspace(0., 1., nDisc).reshape(1, -1).repeat(nJx, 1)
+    horPts     = ToNumpy(listOut[3].evaluate(tHor))
+    horPtsInit = ToNumpy(initSplinesHor.evaluate(tHor))
+    verPts     = ToNumpy(listOut[4].evaluate(tVer))
+    verPtsInit = ToNumpy(initSplinesVert.evaluate(tVer))
+
+    gs = gridspec.GridSpec(nrows=1, ncols=3, width_ratios=[1, 0.05, 2], height_ratios=[1])
+    fig = plt.figure(figsize=(12, 4))
+
+    axTmp = plt.subplot(gs[0, 0])
+    axTmp.scatter(initJointsNP[:, 0], initJointsNP[:, 1], c='b', s=10, label='Initial')
+    for horSpline in horPtsInit:
+        axTmp.plot(horSpline[:, 0], horSpline[:, 1], c='b')
+    for verSpline in verPtsInit:
+        axTmp.plot(verSpline[:, 0], verSpline[:, 1], c='b')
+    axTmp.scatter(optJoints[:, 0], optJoints[:, 1], c='k', s=10, label='Optimized')
+    for horSpline in horPts:
+        axTmp.plot(horSpline[:, 0], horSpline[:, 1], c='k')
+    for verSpline in verPts:
+        axTmp.plot(verSpline[:, 0], verSpline[:, 1], c='k')
     axTmp.set_title("Splines network", fontsize=14)
+    axTmp.legend(fontsize=12)
     axTmp.grid()
 
-    PrintSpeeds(newSplinesHor, nJy)
-    PrintSpeeds(newSplinesVert, nJx)
+    axTmp = plt.subplot(gs[0, 2])
+    axTmp.plot(np.arange(optim_steps+1), ToNumpy(straightVerOptim), label='Straightness vertical')
+    axTmp.plot(np.arange(optim_steps+1), ToNumpy(straightHorOptim), label='Straightness horizontal')
+    axTmp.plot(np.arange(optim_steps+1), ToNumpy(presJointsOptim), label='Joints positions preservation')
+    axTmp.set_title("Losses as optimization goes", fontsize=14)
+    axTmp.legend(fontsize=12)
+    axTmp.grid()
 
     plt.show()
-
-
-
+    
