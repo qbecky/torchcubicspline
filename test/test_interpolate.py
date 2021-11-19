@@ -1,6 +1,8 @@
 import torch
 import torchcubicspline
 
+torch.set_default_dtype(torch.float64)
+
 
 # Represents a random natural cubic spline with a single knot in the middle
 class _Cubic:

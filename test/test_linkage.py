@@ -10,6 +10,8 @@ from torchcubicspline import (natural_cubic_spline_coeffs,
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
 
+torch.set_default_dtype(torch.float64)
+
 def ToNumpy(tensor):
     return tensor.cpu().detach().numpy()
 
@@ -112,6 +114,24 @@ def ComputeStraightness(discPoints):
     lenEdges = torch.linalg.norm(edges, dim=2)                                      # (nRods, nDisc-1)
     cosEdges = dotEdges / (lenEdges[:, 1:] * lenEdges[:, :-1])                      # (nRods, nDisc-2)
     return cosEdges
+
+def ExtractRestQuantites(discPoints):
+    '''
+    Input:
+    - discPoints : torch tensor of shape (nRods, nDisc, 3) containing the discretized point along the rod
+
+    Output:
+    - restLengths : tensor of shape (nRods, nDisc-1) containing the length of each edge
+    - restKappas  : tensor of shape (nRods, nDisc-2) containing the cosine similarity between neighboring edges
+    '''
+
+    edges    = discPoints[:, 1:, :] - discPoints[:, :-1, :]                         # (nRods, nDisc-1, 3)
+    restLengths = torch.linalg.norm(edges, dim=2)                                   # (nRods, nDisc-1)
+    dotEdges = torch.einsum('ijk, ijk -> ij', edges[:, 1:, :], edges[:, :-1, :])    # (nRods, nDisc-2)
+    cosEdges = dotEdges / (restLengths[:, 1:] * restLengths[:, :-1])                # (nRods, nDisc-2)
+    restKappas = cosEdges
+
+    return restLengths, restKappas
 
 def ComputeShapePreservation(tensor1, tensor2):
     ''' 

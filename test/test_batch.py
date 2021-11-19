@@ -7,6 +7,8 @@ from torchcubicspline import (natural_cubic_spline_coeffs,
 import matplotlib.pyplot as plt
 from matplotlib import gridspec
 
+torch.set_default_dtype(torch.float64)
+
 def ToNumpy(tensor):
     return tensor.cpu().detach().numpy()
 
