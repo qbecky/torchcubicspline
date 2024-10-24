@@ -1,7 +1,8 @@
 import math
 import torch
 
-from . import misc
+# from . import misc
+import misc
 
 torch.set_default_dtype(torch.float64)
 
@@ -123,7 +124,7 @@ def _closed_cubic_spline_coeffs_without_missing_values(t, x):
         # U[k]                                L[k - 1]   D[k]
         
         A_diagonal = torch.empty_like(t_, device=x.device)
-        A_diagonal = 2.0 * (torch.roll(time_diffs_reciprocal[..., :-1], shifts=-1, dims=-1) + time_diffs_reciprocal[..., :-1])
+        A_diagonal = 2.0 * (torch.roll(time_diffs_reciprocal[..., :-1], shifts=1, dims=-1) + time_diffs_reciprocal[..., :-1])
         A_upper = time_diffs_reciprocal[..., :-1]
         A_lower = time_diffs_reciprocal[..., :-1]
         
@@ -133,7 +134,7 @@ def _closed_cubic_spline_coeffs_without_missing_values(t, x):
         
         # The RHS of the two systems is 
         system_rhs = torch.stack([
-            (torch.roll(path_diffs_scaled[..., :-1], shifts=-1, dims=-1) + path_diffs_scaled[..., :-1]),
+            (torch.roll(path_diffs_scaled[..., :-1], shifts=1, dims=-1) + path_diffs_scaled[..., :-1]),
             torch.zeros_like(x_, device=x.device),
         ], dim=0)
         systemc_rhs = system_rhs[..., :-1]
@@ -141,16 +142,12 @@ def _closed_cubic_spline_coeffs_without_missing_values(t, x):
         systemc_rhs[1, ..., -1] = - time_diffs_reciprocal[..., -2]
         
         sols = misc.tridiagonal_solve_many_b(systemc_rhs, Ac_upper, Ac_diagonal, Ac_lower)
-        sols_m1 = (system_rhs[0, ..., -1] - A_upper[..., -1] * sols[0, ..., 0] - A_lower[..., -2] * sols[0, ..., -1]) / (A_diagonal[..., -1] + A_upper[..., -1] * sols[1, ..., 0] + A_lower[..., -2] * sols[1, ..., -1])
+        sols_m1 = (system_rhs[0, ..., -1] - A_upper[..., -1] * sols[0, ..., 0] - A_lower[..., -2] * sols[0, ..., -1]) / (A_diagonal[..., -1] + A_lower[..., -1] * sols[1, ..., 0] + A_upper[..., -2] * sols[1, ..., -1])
         
         knot_derivatives = torch.empty_like(x, device=x.device)
         knot_derivatives[..., :-2] = sols[0, ...] + sols_m1.unsqueeze(-1) * sols[1, ...]
         knot_derivatives[..., -2] = sols_m1
         knot_derivatives[..., -1] = knot_derivatives[..., 0]
-        
-        # print(knot_derivatives.shape)
-        # print(six_path_diffs.shape)
-        # print(time_diffs_reciprocal.shape)
 
         # Do some algebra to find the coefficients of the spline
         a = x[..., :-1]
