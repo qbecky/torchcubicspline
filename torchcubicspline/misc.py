@@ -101,3 +101,6 @@ def tridiagonal_solve(b, A_upper, A_diagonal, A_lower):
         outs[i] = (new_b[i] - A_upper[..., i] * outs[i + 1]) / new_A_diagonal[i]
 
     return torch.stack(outs.tolist(), dim=-1)
+
+# Use the same LHS but many RHS
+tridiagonal_solve_many_b = torch.vmap(tridiagonal_solve, in_dims=(0, None, None, None))

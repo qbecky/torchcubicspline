@@ -84,6 +84,86 @@ def _natural_cubic_spline_coeffs_without_missing_values(t, x):
 
     return a, b, two_c, three_d
 
+def _closed_cubic_spline_coeffs_without_missing_values(t, x):
+    # x should be a tensor of shape (..., length)
+    # Will return the b, two_c, three_d coefficients of the derivative of the cubic spline interpolating the path.
+
+    length = x.size(-1)
+    
+    if torch.linalg.norm(x[..., 0] - x[..., -1]) > 1.0e-6:
+        raise ValueError("x must be periodic. The first and last values are {} and {} respectively.".format(x[..., 0], x[..., -1]))
+
+    if length < 3:
+        # In practice this should always already be caught in __init__.
+        raise ValueError("Must have a time dimension of size at least 3 for a periodic curve.")
+    else:
+        # The last derivative is already know, it remains to find the derivatives at the other knots
+        t_ = t[..., :-1]
+        x_ = x[..., :-1]
+        
+        # Set up some intermediate values
+        time_diffs = torch.roll(t, shifts=-1, dims=-1) - t # t_i+1 - t_i
+        time_diffs_reciprocal = time_diffs.reciprocal() # 1 / (t_i+1 - t_i)
+        time_diffs_reciprocal_squared = time_diffs_reciprocal ** 2 # 1 / (t_i+1 - t_i)^2
+        three_path_diffs = 3 * (torch.roll(x, shifts=-1, dims=-1) - x) # x_i+1 - x_i
+        six_path_diffs = 2 * three_path_diffs # 2 * (x_i+1 - x_i)
+        path_diffs_scaled = three_path_diffs * time_diffs_reciprocal_squared.unsqueeze(len(t.shape)-1) # 3 * (x_i+1 - x_i) / (t_i+1 - t_i)^2
+
+        # Finding the knots derivatives is no longer a tridiagonal system, it has values at the corners
+        # It can be solved using two tridiagonal systems using the same matrix Ac = A[:-1, :-1] where A is the following matrix
+        # D[0] U[0]
+        # L[0] D[1] U[1]                                L[k]
+        #     L[1] D[2] U[2]                     0
+        #         L[2] D[3] U[3]
+        #             .    .    .
+        #                 .      .      .
+        #                     .        .        .
+        #                     L[k - 3] D[k - 2] U[k - 2]
+        #     0                     L[k - 2] D[k - 1] U[k - 1]
+        # U[k]                                L[k - 1]   D[k]
+        
+        A_diagonal = torch.empty_like(t_, device=x.device)
+        A_diagonal = 2.0 * (torch.roll(time_diffs_reciprocal[..., :-1], shifts=-1, dims=-1) + time_diffs_reciprocal[..., :-1])
+        A_upper = time_diffs_reciprocal[..., :-1]
+        A_lower = time_diffs_reciprocal[..., :-1]
+        
+        Ac_diagonal = A_diagonal[..., :-1]
+        Ac_upper = A_upper[..., :-2]
+        Ac_lower = A_lower[..., :-2]
+        
+        # The RHS of the two systems is 
+        system_rhs = torch.stack([
+            (torch.roll(path_diffs_scaled[..., :-1], shifts=-1, dims=-1) + path_diffs_scaled[..., :-1]),
+            torch.zeros_like(x_, device=x.device),
+        ], dim=0)
+        systemc_rhs = system_rhs[..., :-1]
+        systemc_rhs[1, ..., 0] = - time_diffs_reciprocal[..., -3]
+        systemc_rhs[1, ..., -1] = - time_diffs_reciprocal[..., -2]
+        
+        sols = misc.tridiagonal_solve_many_b(systemc_rhs, Ac_upper, Ac_diagonal, Ac_lower)
+        sols_m1 = (system_rhs[0, ..., -1] - A_upper[..., -1] * sols[0, ..., 0] - A_lower[..., -2] * sols[0, ..., -1]) / (A_diagonal[..., -1] + A_upper[..., -1] * sols[1, ..., 0] + A_lower[..., -2] * sols[1, ..., -1])
+        
+        knot_derivatives = torch.empty_like(x, device=x.device)
+        knot_derivatives[..., :-2] = sols[0, ...] + sols_m1.unsqueeze(-1) * sols[1, ...]
+        knot_derivatives[..., -2] = sols_m1
+        knot_derivatives[..., -1] = knot_derivatives[..., 0]
+        
+        # print(knot_derivatives.shape)
+        # print(six_path_diffs.shape)
+        # print(time_diffs_reciprocal.shape)
+
+        # Do some algebra to find the coefficients of the spline
+        a = x[..., :-1]
+        b = knot_derivatives[..., :-1]
+        two_c = (six_path_diffs[..., :-1] * time_diffs_reciprocal[..., :-1].unsqueeze(len(t.shape)-1)
+                 - 4 * knot_derivatives[..., :-1]
+                 - 2 * knot_derivatives[..., 1:]) * time_diffs_reciprocal[..., :-1].unsqueeze(len(t.shape)-1)
+        three_d = (-six_path_diffs[..., :-1] * time_diffs_reciprocal[..., :-1].unsqueeze(len(t.shape)-1)
+                   + 3 * (knot_derivatives[..., :-1]
+                          + knot_derivatives[..., 1:])) * time_diffs_reciprocal_squared[..., :-1].unsqueeze(len(t.shape)-1)
+
+    return a, b, two_c, three_d
+
 
 def _natural_cubic_spline_coeffs_with_missing_values(t, x):
     if x.ndimension() == 1:
@@ -187,7 +267,7 @@ def _natural_cubic_spline_coeffs_with_missing_values_scalar(t, x):
 # The mathematics of this are adapted from  http://mathworld.wolfram.com/CubicSpline.html, although they only treat the
 # case of each piece being parameterised by [0, 1]. (We instead take the length of each piece to be the difference in
 # time stamps.)
-def natural_cubic_spline_coeffs(t, x):
+def natural_cubic_spline_coeffs(t, x, close_spline=False):
     """Calculates the coefficients of the natural cubic spline approximation to the batch of controls given.
 
     Arguments:
@@ -195,6 +275,7 @@ def natural_cubic_spline_coeffs(t, x):
         x: tensor of values, of shape (..., length, input_channels), where ... is some number of batch dimensions. This
             is interpreted as a (batch of) paths taking values in an input_channels-dimensional real vector space, with
             length-many observations. Missing values are supported, and should be represented as NaNs.
+        close_spline: If True, the spline will be closed, i.e. the first and last values will be the same.
 
     In particular, the support for missing values allows for batching together elements that are observed at
     different times; just set them to have missing values at each other's observation times.
@@ -226,6 +307,8 @@ def natural_cubic_spline_coeffs(t, x):
         # Transpose because channels are a batch dimension for the purpose of finding interpolating polynomials.
         # b, two_c, three_d have shape (..., channels, length - 1)
         a, b, two_c, three_d = _natural_cubic_spline_coeffs_with_missing_values(t, x.transpose(-1, -2))
+    elif close_spline:
+        a, b, two_c, three_d = _closed_cubic_spline_coeffs_without_missing_values(t, x.transpose(-1, -2))
     else:
         # Can do things more quickly in this case.
         a, b, two_c, three_d = _natural_cubic_spline_coeffs_without_missing_values(t, x.transpose(-1, -2))
@@ -236,8 +319,8 @@ def natural_cubic_spline_coeffs(t, x):
     # The code so far has created twice the c value and three times the d value because it was written with a preference
     # for computing the derivative of the natural cubic spline, which need those values instead. I'm not going to try
     # and change that for this standalone torchcubicspline project, and instead this is a simple fix.
-    c = two_c.transpose(-1, -2) / 2
-    d = three_d.transpose(-1, -2) / 3
+    c = two_c.transpose(-1, -2) / 2.0
+    d = three_d.transpose(-1, -2) / 3.0
     return t, a, b, c, d
 
 
@@ -305,10 +388,10 @@ class NaturalCubicSpline:
         fractional_part = fractional_part.unsqueeze(-1)
 
         if order == 1:
-            inner = 2 * self._c[..., index, :] + 3 * self._d[..., index, :] * fractional_part
+            inner = 2.0 * self._c[..., index, :] + 3.0 * self._d[..., index, :] * fractional_part
             deriv = self._b[..., index, :] + inner * fractional_part
         elif order == 2:
-            deriv = 2 * self._c[..., index, :] + 6 * self._d[..., index, :] * fractional_part
+            deriv = 2.0 * self._c[..., index, :] + 6.0 * self._d[..., index, :] * fractional_part
         else:
             raise ValueError('Derivative is not implemented for orders greater than 2.')
         return deriv
@@ -383,10 +466,10 @@ class NaturalCubicSplineWithVaryingTs:
         idx_broadcast = torch.arange(self._t.shape[0]).reshape(-1, 1)
 
         if order == 1:
-            inner = 2 * self._c[idx_broadcast, index, :] + 3 * self._d[idx_broadcast, index, :] * fractional_part
+            inner = 2.0 * self._c[idx_broadcast, index, :] + 3.0 * self._d[idx_broadcast, index, :] * fractional_part
             deriv = self._b[idx_broadcast, index, :] + inner * fractional_part
         elif order == 2:
-            deriv = 2 * self._c[idx_broadcast, index, :] + 6 * self._d[idx_broadcast, index, :] * fractional_part
+            deriv = 2.0 * self._c[idx_broadcast, index, :] + 6.0 * self._d[idx_broadcast, index, :] * fractional_part
         else:
             raise ValueError('Derivative is not implemented for orders greater than 2.')
         return deriv
