@@ -10,3 +10,6 @@ dist/
 *.so
 *.egg-info/
 **/.mypy_cache/
+
+output/
+.DS_Store
